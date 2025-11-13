@@ -141,49 +141,6 @@ class MainActivity : AppCompatActivity() {
 }
 EOF
 
-# Assets
-mkdir -p app/src/main/assets
-cd app/src/main/assets
-cat > get-vanjs.sh <<EOF
-#!/bin/sh	
-curl -LO "$VANJS_REPO/van-$VANJS_VERSION.nomodule.min.js"
-EOF
-chmod +x ./get-vanjs.sh
-gum spin --show-output --title "Downloading VanJS..." ./get-vanjs.sh
-rm get-vanjs.sh
-
-# Template index.html
-cat > index.html <<EOF
-<!DOCTYPE html>
-<html lang=pt-BR">
-	<head>
-		<title> $APPNAME_SANE </title>
-		<meta name="viewport" content="width=device-width,initial-scale=1">
-		<meta charset="utf-8" />
-	</head>
-	<body>
-		<div id="App"></div>
-		<script src="van-$VANJS_VERSION.nomodule.min.js"></script>
-		<script src="app.js"></script>
-		<script type="text/javascript">
-			document.addEventListener("DOMContentLoaded", ()=> van.add(document.getElementById("App"), App));
-		</script>
-	</body>
-</html>
-EOF
-
-# Template app.js
-cat > app.js <<EOF
-function App() {
-	const { div, h1, button } = van.tags;
-	const count = van.state(1)
-	return div(
-		h1("My First VanJS Android App:", count),
-		button({onclick: ()=> count.val += 1 }, "Click")
-	);
-
-}
-EOF
 cat > app/src/main/java/$(echo $PKG_ID | tr '.' '/')/ReminderReceiver.kt <<EOF
 package $PKG_ID
 
@@ -228,5 +185,49 @@ class ReminderReceiver : BroadcastReceiver() {
 
         manager.notify(notiId, noti)
     }
+}
+EOF
+
+# Assets
+mkdir -p app/src/main/assets
+cd app/src/main/assets
+cat > get-vanjs.sh <<EOF
+#!/bin/sh	
+curl -LO "$VANJS_REPO/van-$VANJS_VERSION.nomodule.min.js"
+EOF
+chmod +x ./get-vanjs.sh
+gum spin --show-output --title "Downloading VanJS..." ./get-vanjs.sh
+rm get-vanjs.sh
+
+# Template index.html
+cat > index.html <<EOF
+<!DOCTYPE html>
+<html lang=pt-BR">
+	<head>
+		<title> $APPNAME_SANE </title>
+		<meta name="viewport" content="width=device-width,initial-scale=1">
+		<meta charset="utf-8" />
+	</head>
+	<body>
+		<div id="App"></div>
+		<script src="van-$VANJS_VERSION.nomodule.min.js"></script>
+		<script src="app.js"></script>
+		<script type="text/javascript">
+			document.addEventListener("DOMContentLoaded", ()=> van.add(document.getElementById("App"), App));
+		</script>
+	</body>
+</html>
+EOF
+
+# Template app.js
+cat > app.js <<EOF
+function App() {
+	const { div, h1, button } = van.tags;
+	const count = van.state(1)
+	return div(
+		h1("My First VanJS Android App:", count),
+		button({onclick: ()=> count.val += 1 }, "Click")
+	);
+
 }
 EOF

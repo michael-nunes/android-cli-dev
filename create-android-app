@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Script Dependencies: gum
+# Script Dependencies: gum, curl
 
 #TEMPLATES="${TEMPLATES:-$HOME/bin/android-cli-dev/templates}"
 
@@ -17,12 +17,28 @@ if [[ ! "$PKG_ID" =~ ^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$ ]]; then
 	exit 1
 fi
 
+VANJS_VERSION="1.6.0"
+VANJS_REPO="https://cdn.jsdelivr.net/gh/vanjs-org/van/public"
+gum confirm "Use VanJS Version: $VANJS_VERSION" || VANJS_VERSION=$(gum input --placeholder "1.2.0" --header "VanJS Version")
+if [ ! curl --head "$VANJS_REPO/van-$VANJS_VERSION.nomodule.min.js" ]; then
+	gum style --foreground 1 "Cannot found VanJS version: $VANJS_VERSION"
+	exit 1
+else
+	gum style --foreground 2 "VanJS $VANJS_VERSION found in $VANJS_REPO"
+fi
+
+
+# SUMARY
 gum style --foreground 2 "Project Sumary"
 gum style --bold "Name:" "$APPNAME"
 gum style --bold "Package ID:" "$PKG_ID"
+gum style --bold "VanJS Version:" "$VANJS_VERSION"
 gum confirm "Create Project?" || exit 0
 PROJECT_DIR=~/projects/"$APPNAME_SANE"
 gum style --foreground 2 "Project Location" "$PROJECT_DIR"
+
+
+# GENERATION
 
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
@@ -81,7 +97,6 @@ cat > app/src/main/AndroidManifest.xml <<EOF
 </manifest>
 EOF
 
-# env APPNAME="$APPNAME" envsubst < $TEMPLATES/AndroidManifest.xml > app/src/main/AndroidManifest.xml 
 
 # GENERATE MAinActivity.kt
 
@@ -120,11 +135,98 @@ class MainActivity : AppCompatActivity() {
 				putExtra("message", message)
 				putExtra("bigText", bigText)
 			}
-			
-		}
+
 	}
+}
 }
 EOF
 
-#env PKG_ID="$PKG_ID" envsubst < $TEMPLATES/MainActivity.kt > app/src/main/java/$(echo $PKG_ID | tr '.' '/')/MainActivity.kt
+# Assets
+mkdir -p app/src/main/assets
+cd app/src/main/assets
+cat > get-vanjs.sh <<EOF
+#!/bin/sh	
+curl -LO "$VANJS_REPO/van-$VANJS_VERSION.nomodule.min.js"
+EOF
+chmod +x ./get-vanjs.sh
+gum spin --show-output --title "Downloading VanJS..." ./get-vanjs.sh
+rm get-vanjs.sh
 
+# Template index.html
+cat > index.html <<EOF
+<!DOCTYPE html>
+<html lang=pt-BR">
+	<head>
+		<title> $APPNAME_SANE </title>
+		<meta name="viewport" content="width=device-width,initial-scale=1">
+		<meta charset="utf-8" />
+	</head>
+	<body>
+		<div id="App"></div>
+		<script src="van-$VANJS_VERSION.nomodule.min.js"></script>
+		<script src="app.js"></script>
+		<script type="text/javascript">
+			document.addEventListener("DOMContentLoaded", ()=> van.add(document.getElementById("App"), App));
+		</script>
+	</body>
+</html>
+EOF
+
+# Template app.js
+cat > app.js <<EOF
+function App() {
+	const { div, h1, button } = van.tags;
+	const count = van.state(1)
+	return div(
+		h1("My First VanJS Android App:", count),
+		button({onclick: ()=> count.val += 1 }, "Click")
+	);
+
+}
+EOF
+cat > app/src/main/java/$(echo $PKG_ID | tr '.' '/')/ReminderReceiver.kt <<EOF
+package $PKG_ID
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import androidx.core.app.NotificationCompat
+
+class ReminderReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val title = intent.getStringExtra("title") ?: "Reminder"
+        val msg = intent.getStringExtra("message") ?: "Time to act!"
+        val big = intent.getStringExtra("bigText")
+
+        val channelId = "app_channel"
+        val notiId = 1001
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(channelId, "App Alerts", NotificationManager.IMPORTANCE_HIGH)
+            )
+        }
+
+        val pIntent = PendingIntent.getActivity(
+            context, 0, Intent(context, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val noti = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(msg)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(big))
+            .setContentIntent(pIntent)
+            .setAutoCancel(true)
+            .build()
+
+        manager.notify(notiId, noti)
+    }
+}
+EOF

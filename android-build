@@ -79,6 +79,9 @@ echo "[+] linking resources and generante R.java"
 	--manifest src/main/AndroidManifest.xml \
 	-I "$ANDROID_JAR" \
 	--target-sdk-version "$targetsdk" \
+	--min-sdk-version "$minsdk" \
+	--version-code "$version_code" \
+	--version-name "$version_name" \
 	--java src/main/java \
 	--auto-add-overlay \
 	--no-version-vectors \
@@ -121,7 +124,8 @@ else
 
 	if [[ "$DO_INSTALL" == "install" ]]; then
 		echo "[+] Installing..."
-		"$ADB" install -r "$FINAL"
+		"$ADB" install -r "$FINAL" && \
+			"$ADB" shell monkey -p "$package" 1
 	fi
 fi
 

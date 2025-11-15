@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail 
+package=$(jq -r '.package' android.json)
+minsdk=$(jq -r '.minsdk' android.json)
+targetsdk=$(jq -r '.targetsdk' android.json)
+build_tools=$(jq -r '.build_tools' android.json)
+version_code=$(jq -r '.version_code' android.json)
+version_name=$(jq -r '.version_name' android.json)
+deps=($(jq -r '.dependencies[]?' android.json))
+
+
+JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk}"
+JAVAC="$JAVA_HOME"/bin/javac
+ANDROID_HOME="${ANDROID_HOME:-$HOME/Sdks/android}"
+BT="$ANDROID_HOME/build-tools/$build_tools"
+AAPT2="$BT/aapt2"
+AAPT="$BT/aapt"
+ADB="$ANDROID_HOME/platform-tools/adb"
+D8="$BT/d8"
+APKSIGNER="$BT/apksigner"
+ZIPALIGN="$BT/zipalign"
+ANDROID_JAR="$ANDROID_HOME/platforms/android-$targetsdk/android.jar"
+BUILD_DIR="$(pwd)/build/android"
+INTER="$BUILD_DIR/intermediates"
+OUT="$BUILD_DIR/outputs/apk"
+LIBS="libs"
+mkdir -p "$INTER" "$OUT" "$LIBS"
+BUILD_TYPE="${1:-debug}"
+DO_INSTALL="${2:-install}"
+echo "android-build -> $package v$version_name ($BUILD_TYPE)"
+hash_deps() {
+	printf '%s\n' "${deps[@]}" | sort | shasum -a 256 | cut -c1-64
+}
+current_hash=$(hash_deps)
+hash_file="$BUILD_DIR/deps.hash"
+if [[ ! -f "$hash_file" ]] || [[ "$current_hash" != "$(cat "$hash_file")" ]]; then
+	echo "Downloading dependencies..."
+	rm -rf "$LIBS"/*
+	for dep in "${deps[@]}"; do
+		if [[ $dep == *":aar" ]]; then
+			ext="aar"
+			dep="${dep%:aar}"
+		else
+			ext="jar"
+		fi
+		IFS=':' read -r g a v <<< "$dep"
+		gp="${g//.//}"
+		file="$a-$v.$ext"
+		[[ -f "$LIBS/$file" ]] && continue
+		url1="https://repo1.maven.org/maven2/$gp/$a/$v/$file"
+		url2="https://maven.google.com/$gp/$a/$v/$file"
+		echo " + $file"
+		echo "   $url1 $url2"
+		curl -f -# -L -o "$LIBS/$file" "$url1" 2>/dev/null || curl -f -# -L -o "$LIBS/$file" "$url2"
+	done
+	echo "$current_hash" > "$hash_file"
+	for aar in "$LIBS"/*.aar; do
+		[[ -f "$aar" ]] || continue
+		unzip -o "$aar" classes.jar -d "$LIBS" 
+		mv "$LIBS/classes.jar" "$LIBS/$(basename "$aar" .aar)-classes.jar"
+	done
+else
+	[[ ${#deps[@]} -gt 0 ]] && echo "Dependencies cached ($LIBS)"
+fi
+
+CLASSPATH="$ANDROID_JAR"
+for jar in "$LIBS"/*.jar; do [[ -f "$jar" ]] && CLASSPATH="$CLASSPATH:$jar"; done
+
+# COMPILE APP RESOURCES
+echo "[+] compiling app resources..."
+"$AAPT2" compile \
+	--dir src/main/res \
+	-o "$INTER/flat_temp"
+unzip -oq "$INTER/flat_temp" -d "$INTER/flat"
+rm "$INTER/flat_temp"
+
+echo "[+] linking resources and generante R.java"
+"$AAPT2" link \
+	--manifest src/main/AndroidManifest.xml \
+	-I "$ANDROID_JAR" \
+	--target-sdk-version "$targetsdk" \
+	--java src/main/java \
+	--auto-add-overlay \
+	--no-version-vectors \
+	-o "$INTER/unaligned.apk" \
+	"$INTER/flat"/*.flat
+
+echo "[+] compilando java..."
+"$JAVAC" -d "$INTER/classes" \
+	-source 1.8 -target 1.8 \
+	-cp "$CLASSPATH" \
+	-encoding UTF-8 \
+$(find src/main/java -name "*.java" 2>/dev/null)
+
+#"$D8" "$INTER/classes"/$(echo "$package" | tr '.' '/')/*.class --output "$INTER" --min-api 24
+"$D8" $(find "$INTER/classes" -type f -name "*.class" | tr '\n' ' ') --output "$INTER" --min-api 24
+
+
+zip -uj "$INTER/unaligned.apk" "$INTER/classes.dex"
+
+pushd "src/main/"
+zip -ur "$INTER/unaligned.apk" assets/*
+popd 
+
+if [[ "$BUILD_TYPE" == "release" ]]; then
+	FINAL="${package##*.}-${version_name}.apk"
+	"$ZIPALIGN" -f -p 4 "$INTER/unaligned.apk" "$INTER/unasigned.apk"
+	"$APKSIGNER" sign --ks "${RELEASE_KEYSTORE:-$HOME/.android/release.keystore}" \
+		--out "$FINAL" "$INTER/unasigned.apk"
+else
+	KS="${DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
+	if [ ! -f "$KS" ]; then
+		$JAVA_HOME/bin/keytool -genkey -v -keystore "$KS" -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Dev" -storepass android -keypass android -noprompt
+	fi
+	FINAL="${package##*.}-${version_name}-debug.apk"
+	"$APKSIGNER" sign --ks "$HOME/.android/debug.keystore" \
+		--ks-key-alias androiddebugkey \
+		--ks-pass pass:android \
+		--key-pass pass:android \
+		--out "$FINAL" "$INTER/unaligned.apk"
+
+	if [[ "$DO_INSTALL" == "install" ]]; then
+		echo "[+] Installing..."
+		"$ADB" install -r "$FINAL"
+	fi
+fi
+

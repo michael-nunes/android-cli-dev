@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 0 ]]; then
+	echo "Usage: android-new <my.app.package>"
+	exit 1
+fi
+PKG="$1"
+if [[ ! "$PKG" =~ ^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$ ]]; then
+	echo "Invalid package name"
+	exit 1
+fi
+PKGDIR="$(echo "$PKG" | tr '.' '/')"
+read -p "Project Nickname (default: ${PKG##*.}): " APPNICKNAME
+APPNICKNAME=${APPNICKNAME:-${PKG##*.}}
+if [[ -z "$APPNICKNAME" ]]; then
+	echo "Invalid nickname"
+	exit 1
+fi
+read -p "minSdk (default: 24): " MINSDK
+MINSDK=${MINSDK:-24}
+read -p "targetSdk (default: 34): " TARGETSDK
+TARGETSDK=${TARGETSDK:-34}
+echo ""
+echo "Will create project at: $(pwd)/${PKG##*.}"
+read -p "Proceed? (y/n): " CONFIRM
+[[ "$CONFIRM"  =~ ^[nN] ]] && echo "Aborted." && exit 0
+PKGHOME="$(pwd)/${PKG##*.}"
+mkdir -p "$PKGHOME"/src/main/{java,res/{layout,values,drawable},assets}
+mkdir -p "$PKGHOME"/{libs,build}
+cd "$PKGHOME"
+cat > android.json << EOF
+{
+	"package": "$PKG",
+	"minsdk": $MINSDK,
+	"targetsdk": $TARGETSDK,
+	"version_code":1,
+	"version_name":"1.0.0",
+	"build_tools":"34.0.0",
+	"dependencies" : [
+	]
+}	
+EOF
+cat > src/main/AndroidManifest.xml << EOF
+<?xml version="1.0" encoding="utf-8"?>
+<manifest package="$PKG"
+    xmlns:android="http://schemas.android.com/apk/res/android">
+		<uses-permission android:name="android.permission.INTERNET" />
+		<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <application
+        android:allowBackup="true"
+        android:label="$APPNICKNAME"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <activity android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+EOF
+cat > src/main/res/values/strings.xml << EOF
+<resources>
+	<string name="app_name">$APPNICKNAME</string>
+</resources>
+EOF
+mkdir -p "src/main/java/$PKGDIR"
+cat > "src/main/java/$PKGDIR/MainActivity.java" << 'EOF'
+package PACKAGE_REPLACE;
+
+import android.annotation.SuppressLint;
+import android.os.Bundle;
+import android.webkit.*;
+import android.app.Activity;
+
+public class MainActivity extends Activity {
+    WebView webView;
+
+    @JavascriptInterface
+    public void toast(String msg) {
+        android.widget.Toast.makeText(this, msg, 0).show();
+    }
+
+    @JavascriptInterface
+    public void finishApp() {
+        finishAndRemoveTask();
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    @Override protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        webView = new WebView(this);
+				webView.setWebContentsDebuggingEnabled(true);
+        setContentView(webView);
+
+        WebSettings s = webView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setDatabaseEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+
+        webView.addJavascriptInterface(this, "Android");
+        webView.loadUrl("file:///android_asset/index.html");
+    }
+
+    @Override public void onBackPressed() {
+        if (webView.canGoBack()) webView.goBack();
+        else super.onBackPressed();
+    }
+}
+EOF
+sed -i "s/PACKAGE_REPLACE/$PKG/g" "src/main/java/$PKGDIR/MainActivity.java"
+echo "Downloading VanJS 1.6.0"
+curl -sL https://cdn.jsdelivr.net/gh/vanjs-org/van/public/van-1.6.0.nomodule.min.js \
+	-o src/main/assets/van-1.6.0.nomodule.min.js
+cat > "src/main/assets/index.html" << EOF
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>$APPNICKNAME</title>
+	<script src="./van-1.6.0.nomodule.min.js"></script>
+	<script type="text/javascript">
+		const App = () => {
+			const {div, h1, p, button} = van.tags
+			const count = van.state(0)
+			return div({style: "padding:2rem;text-align:center;font-family:system-ui"},
+				h1("$APPNICKNAME"),
+				p("Contador: ", count),
+				button({onclick: () => count.val++}, "Mais"),
+				button({onclick: () => Android.toast("VanJS + Android = amor")}, "Toast"),
+				button({onclick: () => Android.finishApp()}, "Sair"),
+				p({style: "margin-top:3rem;opacity:0.6"}, "Edit assets/index.html → recarrega em 150ms")
+			)
+		}
+		document.addEventListener("DOMContentLoaded",()=>van.add(document.body, App()));
+	</script>
+
+	${WS:+<!-- Hot-reload via WebSocket -->}
+	${WS:+<script>}
+	${WS:+  if (location.hostname !== "localhost") \{}
+	${WS:+    const ws = new WebSocket("ws://192.168.1.100:8080") // mude seu IP}
+	${WS:+    ws.onmessage = (e) => e.data === "reload" && location.reload()}
+	${WS:+  \}}
+	${WS:+</script>}
+
+	<style>body{margin:0;background:#f9f9f9}</style>
+	</head>
+	<body></body>
+</html>
+EOF
+
+cat > devserver.py <<'EOF'
+#!/usr/bin/env python3
+import asyncio, websockets, os
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+class R(FileSystemEventHandler):
+    def on_modified(self, e):
+        asyncio.create_task(broadcast("reload"))
+
+async def broadcast(msg):
+    for ws in websockets.server.websockets:
+        try: await ws.send(msg)
+        except: pass
+
+async def handler(ws):
+    await ws.send("ok")
+
+async def main():
+    Observer().schedule(R(), "src/main/assets", recursive=True).start()
+    print("Hot Reload ativo → ws://SEU_IP:8080")
+    print("Execute: adb reverse tcp:8080 tcp:8080")
+    async with websockets.serve(handler, "0.0.0.0", 8080):
+        await asyncio.Future()
+
+asyncio.run(main())
+EOF
+chmod +x devserver.py
